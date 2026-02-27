@@ -29,5 +29,17 @@ rag:
     fusion: rrf
     rrf_k: 60
   sources_default: ["policy", "manual", "script"]
+classify:
+  top_k: 6
+prevision:
+  max_images: 3
+  timeout_s: 20
+  retry: 1
+  confidence_threshold: 0.65
+handoff:
+  notification_channels: ["webhook"]
+grounding:
+  threshold: 0.7
+  max_rewrite: 2
 mcp:
   url: http://mcp:9000

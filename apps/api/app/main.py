@@ -76,7 +76,7 @@ def logger(node: str, state: dict[str, Any]) -> None:
     repo.upsert_case(case_id, case_id, state)
 
 
-graph = compile_graph(llm=llm, tool_call=tool_call, policy_map=policies, logger=logger)
+graph = compile_graph(llm=llm, tool_call=tool_call, policy_map=policies, logger=logger, repo=repo)
 app = FastAPI(title="Board Bot API")
 
 
@@ -113,6 +113,7 @@ def process_case(req: ProcessRequest) -> dict[str, Any]:
         "draft": {},
         "decision": {},
         "telemetry": {"prompt_version": "v1", "config_version": cfg.version, "model": model_name, "metrics": []},
+        "config": cfg.data,
     }
     out = graph.invoke(state)
     return {"case_id": case_id, "decision": out.get("decision"), "draft": out.get("draft"), "tool_trace": out.get("tooling", {}).get("trace", [])}

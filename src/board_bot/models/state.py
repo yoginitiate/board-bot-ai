@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-DecisionType = Literal["AUTO_POST", "DRAFT", "ASK_MORE", "HANDOFF"]
+DecisionType = Literal["AUTO_POST", "DRAFT", "HANDOFF"]
 """최종 처리 결정 타입."""
 
 ModeType = Literal["SCENARIO", "AGENT", "AUTO"]

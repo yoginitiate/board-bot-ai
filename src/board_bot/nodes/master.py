@@ -1,69 +1,76 @@
-"""Master 영역 노드를 정의한다.
-
-Master는 "무엇을 할지"를 결정한다. 즉, 입력 정규화/PII 마스킹, 분류+리스크,
-사전 비전 필요성, 정책 로딩, Plan DSL 생성까지 수행한다.
-
-Observability:
-    주요 단계에서 `metrics_events` 적재용 텔레메트리 이벤트를 버퍼링한다.
-Security:
-    LLM 호출에는 반드시 마스킹 텍스트를 사용한다.
-"""
+"""Master 영역 노드."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import re
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from pymilvus import Collection, connections
 
 from board_bot.models.state import AgentState
-from board_bot.services.llm_chains import classification_chain
+from board_bot.services.llm_chains import ALLOWED_INTENTS, classification_chain, slot_extraction_chain
 from board_bot.services.metrics import emit_metric
-from board_bot.services.prompts import load_prompt
 from board_bot.utils.safety import mask_pii, risk_score_rule
+
+_INTENT_TO_TYPE = {
+    "상품 누락": ("주문", "누락"),
+    "상품 오배송": ("주문", "오배송"),
+    "상품 미배송": ("배송", "미배송"),
+    "품절": ("주문", "품절"),
+    "상품 파손": ("클레임", "파손"),
+    "주문 취소": ("주문", "취소"),
+}
+_PREVISION_INTENTS = {"상품 누락", "상품 오배송", "상품 미배송", "상품 파손"}
 
 
 def normalize_and_mask(state: AgentState) -> AgentState:
-    """입력을 정규화하고 1차 PII 마스킹을 수행한다.
-
-    Args:
-        state: LangGraph 공유 상태.
-
-    Returns:
-        마스킹 결과(`safety.masked_text`)가 반영된 상태.
-
-    Side Effects:
-        - `case_received` 메트릭 이벤트를 telemetry 버퍼에 추가한다.
-
-    Security/Privacy:
-        - 이후 노드/LLM은 원문이 아닌 `masked_text`를 사용해야 한다.
-    """
-
-    body = state["input"]["body"].strip()
-    title = state["input"]["title"].strip()
+    body = re.sub(r"\s+", " ", state["input"]["body"]).strip()
+    title = re.sub(r"\s+", " ", state["input"]["title"]).strip()
     masked = mask_pii(f"{title}\n{body}")
+    state["input"]["body"] = body
+    state["input"]["title"] = title
     state["safety"] = {"masked_text": masked, "pii_masked": True}
     emit_metric(state, "case_received", tags={"success": True})
     return state
 
 
+def _retrieve_intent_examples(state: AgentState, top_k: int) -> str:
+    cfg = state.get("config", {})
+    host = cfg.get("milvus", {}).get("host", "milvus")
+    port = cfg.get("milvus", {}).get("port", 19530)
+    api_key = cfg.get("gemini", {}).get("api_key") or ""
+    emb_model = cfg.get("gemini", {}).get("embedding_model", "models/embedding-001")
+    try:
+        connections.connect(alias="intent", host=host, port=str(port))
+        coll = Collection("intent_examples", using="intent")
+        coll.load()
+        if api_key:
+            vec = GoogleGenerativeAIEmbeddings(model=emb_model, google_api_key=api_key).embed_query(state["safety"]["masked_text"])
+        else:
+            vec = [0.1] * 8
+        res = coll.search([vec], "embedding", {"metric_type": "COSINE", "params": {"nprobe": 10}}, limit=top_k, output_fields=["intent_label", "example_text"])
+        lines = []
+        for h in res[0]:
+            ent = h.entity
+            lines.append(f"- {ent.get('intent_label')}: {ent.get('example_text')}")
+        return "\n".join(lines)
+    except Exception:
+        return "\n".join([f"- {i}: 샘플 예문" for i in ALLOWED_INTENTS[:top_k]])
+
+
 def _dummy_classification(state: AgentState, rule_risk: dict[str, Any]) -> dict[str, Any]:
-    """LLM 미사용 환경에서 분류 결과 스텁을 생성한다.
-
-    Why:
-        네트워크/키 부재 환경에서도 파이프라인 회귀 테스트가 가능해야 하므로,
-        스키마 호환 더미 결과를 고정 형태로 반환한다.
-    """
-
+    label = "상품 미배송"
     issue = {
         "issue_id": "I1",
         "summary": state["input"]["title"][:40],
         "span": {"start": 0, "end": len(state["safety"]["masked_text"])},
-        "intent": {"type": state["input"]["type"], "subtype": state["input"]["subtype"], "confidence": 0.82},
-        "required_tools": ["rag_search", "post_reply"],
+        "intent": {"type": _INTENT_TO_TYPE[label][0], "subtype": _INTENT_TO_TYPE[label][1], "confidence": 0.7, "label": label},
+        "required_tools": ["rag_search", "get_shipping", "post_reply"],
         "missing_slots": [],
         "needs_image": len(state["input"].get("attachments", [])) > 0,
-        "needs_order_ref": "주문" in state["safety"]["masked_text"],
+        "needs_order_ref": True,
         "risk": rule_risk,
     }
     return {
@@ -72,153 +79,139 @@ def _dummy_classification(state: AgentState, rule_risk: dict[str, Any]) -> dict[
         "is_multi_issue": False,
         "issues": [issue],
         "mismatch": {"is_mismatch": False, "reason": ""},
-        "risk": {
-            "level": rule_risk["level"],
-            "tags": rule_risk["tags"],
-            "handoff_required": rule_risk["level"] == "HIGH",
-            "handoff_reason": "rule_high" if rule_risk["level"] == "HIGH" else "",
-        },
-        "needs": {"prevision": issue["needs_image"]},
+        "risk": {"level": rule_risk["level"], "tags": rule_risk["tags"], "handoff_required": rule_risk["level"] == "HIGH", "handoff_reason": "rule_high" if rule_risk["level"] == "HIGH" else ""},
+        "needs": {"prevision": issue["needs_image"] and label in _PREVISION_INTENTS},
         "answer_strategy": {"composition_hint": "SECTIONED_REPLY", "mode_hint": "SCENARIO"},
     }
 
 
 def classify_risk_route(state: AgentState, llm: ChatGoogleGenerativeAI | None = None) -> AgentState:
-    """분류/리스크/라우팅을 단일 단계로 수행한다.
-
-    Args:
-        state: LangGraph 공유 상태.
-        llm: Gemini LLM 인스턴스. 없으면 더미 분류를 사용한다.
-
-    Returns:
-        `classification` 결과와 필요 시 `decision=HANDOFF`가 반영된 상태.
-
-    Side Effects:
-        - `llm_usage`, `classification_completed` 이벤트를 telemetry에 적재.
-
-    Security/Privacy:
-        - LLM 입력은 `safety.masked_text`만 사용한다.
-        - risk_tags/mismatch_reason 등 요약 코드만 저장하고 원문은 저장하지 않는다.
-
-    Observability:
-        - `classification_completed`에 mismatch/risk/multi-issue 태그를 기록한다.
-
-    Raises:
-        json.JSONDecodeError: LLM 응답이 JSON 스키마를 따르지 않는 경우.
-    """
-
     rule_risk = risk_score_rule(state["safety"]["masked_text"])
-    prompt = load_prompt("prompts/classify_risk_route.yaml")
+    top_k = int(state.get("config", {}).get("classify", {}).get("top_k", 6))
+    context = _retrieve_intent_examples(state, top_k)
     if llm is None:
         cls = _dummy_classification(state, rule_risk)
         emit_metric(state, "llm_usage", tags={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0, "success": True})
     else:
-        cls = classification_chain(llm, state["safety"]["masked_text"])
-        emit_metric(state, "llm_usage", tags={"prompt_tokens": 200, "completion_tokens": 150, "total_tokens": 350, "estimated_cost_usd": 0.001, "success": True})
+        parsed = classification_chain(llm, state["safety"]["masked_text"], context)
+        intents = parsed.get("intents", [])[:3]
+        issues = []
+        for idx, it in enumerate(intents or [{"label": "상품 미배송", "confidence": 0.5}], start=1):
+            t, st = _INTENT_TO_TYPE[it["label"]]
+            issues.append(
+                {
+                    "issue_id": f"I{idx}",
+                    "summary": it["label"],
+                    "span": {"start": 0, "end": len(state["safety"]["masked_text"])},
+                    "intent": {"type": t, "subtype": st, "confidence": float(it.get("confidence", 0.0)), "label": it["label"]},
+                    "required_tools": ["rag_search", "post_reply"],
+                    "missing_slots": [],
+                    "needs_image": len(state["input"].get("attachments", [])) > 0 and it["label"] in _PREVISION_INTENTS,
+                    "needs_order_ref": it["label"] in {"상품 미배송", "상품 오배송", "상품 누락"},
+                    "risk": parsed.get("risk", {}),
+                }
+            )
+        primary = issues[0]["intent"]
+        cls = {
+            "primary_intent": primary,
+            "secondary_intents": [i["intent"] for i in issues[1:]],
+            "is_multi_issue": len(issues) > 1,
+            "issues": issues,
+            "mismatch": {"is_mismatch": False, "reason": ""},
+            "risk": parsed.get("risk", {"level": rule_risk["level"], "tags": rule_risk["tags"], "handoff_required": False, "handoff_reason": ""}),
+            "needs": {"prevision": any(i["needs_image"] for i in issues)},
+            "answer_strategy": {"composition_hint": "SECTIONED_REPLY", "mode_hint": "SCENARIO"},
+        }
+        emit_metric(state, "llm_usage", tags={"prompt_tokens": 250, "completion_tokens": 180, "total_tokens": 430, "estimated_cost_usd": 0.0012, "success": True})
 
-    # 2단 게이트 취지: 규칙/LLM 중 하나라도 HIGH면 즉시 HANDOFF 하여 리스크 확산을 방지한다.
     if rule_risk["level"] == "HIGH" or cls["risk"]["level"] == "HIGH":
-        state["decision"] = {"type": "HANDOFF", "reason": "high_risk", "tags": list(set(rule_risk["tags"] + cls["risk"].get("tags", [])))}
+        state["decision"] = {"type": "HANDOFF", "reason": "high_risk", "tags": list(set(rule_risk.get("tags", []) + cls["risk"].get("tags", [])))}
     state["classification"] = cls
-    emit_metric(
-        state,
-        "classification_completed",
-        tags={
-            "is_mismatch": cls["mismatch"]["is_mismatch"],
-            "mismatch_reason": cls["mismatch"].get("reason", ""),
-            "risk_level": cls["risk"]["level"],
-            "risk_tags": ",".join(cls["risk"].get("tags", [])),
-            "handoff_required": cls["risk"].get("handoff_required", False),
-            "is_multi_issue": cls["is_multi_issue"],
-            "issues_count": len(cls["issues"]),
-            "composition_hint": cls["answer_strategy"].get("composition_hint", "SECTIONED_REPLY"),
-        },
-    )
+    emit_metric(state, "classification_completed", tags={"is_mismatch": cls["mismatch"]["is_mismatch"], "mismatch_reason": cls["mismatch"].get("reason", ""), "risk_level": cls["risk"]["level"], "risk_tags": ",".join(cls["risk"].get("tags", [])), "handoff_required": cls["risk"].get("handoff_required", False), "is_multi_issue": cls["is_multi_issue"], "issues_count": len(cls["issues"]), "composition_hint": cls["answer_strategy"].get("composition_hint", "SECTIONED_REPLY")})
     return state
 
 
 def prevision_need_gate(state: AgentState) -> AgentState:
-    """사전 비전 분석 필요 여부를 경량 규칙으로 결정한다.
-
-    Why:
-        모든 케이스에서 비전/OCR을 호출하면 비용과 지연이 커지므로,
-        분류 결과의 `needs.prevision` 신호로 선별 호출한다.
-    """
-
-    state["signals"] = {"need_prevision": bool(state["classification"].get("needs", {}).get("prevision"))}
+    issues = state.get("classification", {}).get("issues", [])
+    has_attachment = len(state["input"].get("attachments", [])) > 0
+    need = has_attachment and any(i.get("intent", {}).get("label") in _PREVISION_INTENTS for i in issues)
+    state.setdefault("signals", {})["need_prevision"] = need
     return state
 
 
 def prevision(state: AgentState, tool_call) -> AgentState:
-    """비전 선판단 도구를 호출해 추가 신호를 상태에 기록한다.
-
-    Args:
-        state: LangGraph 공유 상태.
-        tool_call: MCP tool 호출 함수.
-
-    Returns:
-        `signals.vision`이 추가된 상태(필요 시).
-
-    Side Effects:
-        외부 MCP 네트워크 I/O가 발생할 수 있다.
-    """
-
-    if not state["signals"].get("need_prevision"):
+    cfg = state.get("config", {}).get("prevision", {})
+    max_images = int(cfg.get("max_images", 3))
+    threshold = float(cfg.get("confidence_threshold", 0.65))
+    if not state.get("signals", {}).get("need_prevision"):
+        state.setdefault("signals", {})["vision"] = {"label": "unknown", "confidence": 0.0, "unknown_reason": "not_required"}
         return state
-    result = tool_call("vision_triage", {"attachments": state["input"].get("attachments", [])})
-    state["signals"]["vision"] = result
+    attachments = state["input"].get("attachments", [])[:max_images]
+    res = tool_call("vision_triage", {"attachments": attachments, "timeout_s": int(cfg.get("timeout_s", 20)), "retry": int(cfg.get("retry", 1))})
+    label = "unknown"
+    confidence = float(max(res.get("damage", 0.0), res.get("misdelivery", 0.0), 1.0 - float(res.get("unclear", 0.0))))
+    if confidence >= threshold:
+        if res.get("damage", 0.0) >= max(res.get("misdelivery", 0.0), res.get("unclear", 0.0)):
+            label = "파손"
+        elif res.get("misdelivery", 0.0) >= max(res.get("damage", 0.0), res.get("unclear", 0.0)):
+            label = "오배송"
+        else:
+            label = "불명확"
+    state.setdefault("signals", {})["vision"] = {
+        "label": label,
+        "confidence": confidence,
+        "unknown_reason": "low_confidence" if label == "unknown" else "",
+        "raw": res,
+    }
     return state
 
 
 def policy_loader(state: AgentState, policy_map: dict[str, Any]) -> AgentState:
-    """유형/상세유형 키로 정책을 로딩한다.
-
-    Why:
-        정책을 그래프 외부 주입형으로 유지하면 테넌트별 운영 변경 시 코드 배포를 최소화할 수 있다.
-    """
-
-    key = f"{state['input']['type']}::{state['input']['subtype']}"
+    primary = state.get("classification", {}).get("primary_intent", {})
+    key = f"{primary.get('type', state['input']['type'])}::{primary.get('subtype', state['input']['subtype'])}"
     state["policy"] = policy_map.get(key, {"mode": "SCENARIO", "allow_auto_post": True})
     return state
 
 
-def plan_builder(state: AgentState) -> AgentState:
-    """Plan DSL을 구성한다.
-
-    Args:
-        state: 분류/정책이 반영된 상태.
-
-    Returns:
-        `plan`이 채워진 상태.
-
-    Side Effects:
-        없음(계획 생성만 수행).
-
-    Why:
-        - HANDOFF는 비용/리스크 절감을 위해 계획 생성을 생략한다.
-        - SCENARIO는 정적 템플릿 기반으로 단순/저비용 처리한다.
-        - AGENT는 복합 케이스에서 확장 가능성을 위해 도구 실행 단계를 포함한다.
-        - budget(max_tools/max_tokens/max_time_ms/retry/circuit_breaker)은
-          무한 재시도/과도한 호출을 방지하는 안전 장치다.
-    """
-
+def plan_builder(state: AgentState, llm: ChatGoogleGenerativeAI | None = None) -> AgentState:
     if state.get("decision", {}).get("type") == "HANDOFF":
-        state["plan"] = {"steps": [], "budget": {}}
+        state["plan"] = {"steps": [], "budget": {}, "use_prevision": False}
         return state
-
-    mode = state["classification"]["answer_strategy"].get("mode_hint", "SCENARIO")
-    scenario_path = Path("scenarios") / f"{state['input']['type']}_{state['input']['subtype']}.yaml"
-    if mode == "SCENARIO" and scenario_path.exists():
-        steps = [{"tool": "rag_search", "args": {"query": state["safety"]["masked_text"]}}]
+    mode = state["policy"].get("mode", "SCENARIO")
+    issues = state.get("classification", {}).get("issues", [])[:3]
+    masked = state["safety"]["masked_text"]
+    slots = slot_extraction_chain(llm, masked) if llm else {"product_name": "", "quantity": "", "date": "", "order_status": "", "shipping_status": ""}
+    state.setdefault("tooling", {})["slots"] = slots
+    independent = len({i["intent"]["label"] for i in issues}) == len(issues) and len(issues) > 1
+    if mode == "SCENARIO":
+        steps = [{"tool": "rag_search", "args": {"query": masked, "sources": ["policy", "manual", "script"], "top_k": 5}}, {"tool": "get_shipping", "args": {"order_id": ""}}]
     else:
-        steps = [{"tool": "rag_search", "args": {"query": state["safety"]["masked_text"]}}, {"tool": "post_reply", "args": {"dry_run": True}}]
-        mode = "AGENT"
-
+        steps = [{"tool": "rag_search", "args": {"query": masked}}, {"tool": "get_order", "args": {}}, {"tool": "get_shipping", "args": {}}]
     state["plan"] = {
         "mode": mode,
-        "issues": state["classification"]["issues"],
-        # Plan DSL 핵심 필드: steps(실행 목록), budget(한도), 향후 guards/on_fail 확장 여지.
+        "issues": issues,
         "steps": steps,
-        "budget": {"max_tools": 5, "max_tokens": 4000, "max_time_ms": 5000, "retry": 1, "circuit_breaker": 2},
+        "subplans": [{"issue_id": i["issue_id"], "steps": steps} for i in issues],
+        "max_parallel": 3 if independent else 1,
+        "independent_issues": independent,
+        "use_prevision": bool(state.get("signals", {}).get("need_prevision")),
+        "budget": {"max_tools": 6, "max_tokens": 4000, "max_time_ms": 6000, "retry": 1, "circuit_breaker": 2},
     }
+    return state
+
+
+def handoff_notify(state: AgentState, tool_call, repo) -> AgentState:
+    case_id = state["input"]["case_id"]
+    if repo.is_handoff_notified(case_id):
+        state.setdefault("decision", {}).setdefault("notify", {"status": "skipped", "reason": "already_notified"})
+        return state
+    payload = {
+        "case_id": case_id,
+        "tenant_id": state["input"].get("tenant_id"),
+        "reason": state.get("decision", {}).get("reason", "high_risk"),
+        "tags": state.get("decision", {}).get("tags", []),
+    }
+    result = tool_call("notify_handoff", payload)
+    repo.mark_handoff_notified(case_id, payload)
+    state.setdefault("decision", {})["notify"] = result
     return state

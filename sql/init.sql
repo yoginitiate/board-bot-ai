@@ -51,3 +51,10 @@ CREATE TABLE IF NOT EXISTS rag_documents (
 
 CREATE INDEX IF NOT EXISTS idx_rag_docs_source ON rag_documents(source_type);
 CREATE INDEX IF NOT EXISTS idx_rag_docs_tenant ON rag_documents(tenant_id);
+
+
+CREATE TABLE IF NOT EXISTS handoff_notifications (
+  case_id TEXT PRIMARY KEY,
+  payload_jsonb JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

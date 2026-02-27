@@ -82,6 +82,19 @@ class PostgresRepo:
                     },
                 )
 
+
+    def is_handoff_notified(self, case_id: str) -> bool:
+        with self.engine.begin() as conn:
+            row = conn.execute(text("SELECT 1 FROM handoff_notifications WHERE case_id=:id LIMIT 1"), {"id": case_id}).first()
+        return row is not None
+
+    def mark_handoff_notified(self, case_id: str, payload: dict[str, Any]) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO handoff_notifications(case_id, payload_jsonb, created_at) VALUES (:id, CAST(:payload AS jsonb), now()) ON CONFLICT (case_id) DO NOTHING"),
+                {"id": case_id, "payload": json.dumps(payload)},
+            )
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         """단일 케이스 상태를 조회한다."""
 

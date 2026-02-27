@@ -177,7 +177,7 @@ def _download_if_needed(url_or_path: str) -> Path:
 
 
 @mcp.tool()
-def vision_triage(attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def vision_triage(attachments: list[dict[str, Any]] | None = None, timeout_s: int = 20, retry: int = 1) -> dict[str, Any]:
     attachments = attachments or []
     if not attachments or genai is None or not GOOGLE_API_KEY:
         return {"damage": 0.0, "misdelivery": 0.0, "unclear": 1.0, "notes": "no_image_or_api_key"}
@@ -244,3 +244,21 @@ def post_reply(case_id: str, content: str, mode: str = "AUTO_POST", dry_run: boo
 
 
 app = mcp.http_app(path="/")
+
+
+@mcp.tool()
+def notify_handoff(case_id: str, tenant_id: str = "", reason: str = "", tags: list[str] | None = None) -> dict[str, Any]:
+    payload = {"case_id": case_id, "tenant_id": tenant_id, "reason": reason, "tags": tags or []}
+    # PoC 실호출 구조: webhook URL이 있으면 HTTP POST
+    webhook = os.getenv("HANDOFF_WEBHOOK_URL", "")
+    delivered = False
+    status = "stub"
+    if webhook:
+        try:
+            resp = httpx.post(webhook, json=payload, timeout=10)
+            delivered = resp.status_code < 300
+            status = f"http:{resp.status_code}"
+        except Exception:
+            delivered = False
+            status = "http_error"
+    return {"delivered": delivered, "channel": "webhook", "status": status}

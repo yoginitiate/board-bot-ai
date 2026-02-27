@@ -1,61 +1,61 @@
 # Board Bot AI MVP + Dashboard
 
-LangGraph 기반 게시판 Agent와 Business Insight/AI KPI 대시보드입니다.
-
-## 서비스 구성
-- API: FastAPI (`/v1/cases/process`, `/v1/cases/{case_id}`)
-- MCP: FastMCP tool 서버 (`rag_search`, `vision_triage` 포함)
-- Dashboard: Streamlit 멀티 페이지 (`streamlit_app/`)
-- Storage: Postgres, Milvus, MinIO
-
 ## 실행
 ```bash
 docker compose up --build
 ```
-- API: http://localhost:8000
-- MCP: http://localhost:9002
-- Streamlit Dashboard: http://localhost:8501
 
-## 환경변수
-- `GOOGLE_API_KEY`: Gemini Text/MM/Embedding 공통 API 키
-- `GEMINI_API_KEY`: 하위호환 키(선택)
+## 필수 환경변수
+- `GOOGLE_API_KEY` (Gemini Text/MM/Embedding)
+- 선택: `GEMINI_API_KEY` (호환)
 
-## Hybrid RAG 설정
-- Dense: Milvus (`rag_policy`, `rag_manual`, `rag_script`) + Gemini Embedding
-- Sparse: Postgres `rag_documents` + BM25(rank-bm25)
-- Fusion: RRF (dense+sparse 결합)
-- 기본 값은 `config/app.yaml`의 `rag.hybrid` 및 `gemini.embedding_model` 참조
-
-## 샘플 데이터 적재
+## 데이터 시드
 ```bash
 python scripts/load_sample_rag.py
+python scripts/load_intent_examples.py
 python scripts/seed_dashboard_data.py
 ```
-또는 컨테이너 내부:
-```bash
-docker compose exec api python scripts/load_sample_rag.py
-docker compose exec api python scripts/seed_dashboard_data.py
-```
 
-## Agent 모드 Tool Calling 검증 방법
-1. `type=클레임`, `subtype=파손`으로 `/v1/cases/process` 호출
-2. 응답의 `tool_trace` 또는 저장된 case state의 `tooling.agent_steps` 확인
-3. `metrics_events`에서 `metric_name='tool_call'` 이벤트가 1건 이상 기록되는지 확인
-4. 최종 `draft.text`에 도구 실행 결과 반영 여부 확인
+## 이번 구현 핵심
+- `normalize_and_mask`: 마스킹 + 경량 전처리만 수행
+- `classify_risk_route`:
+  - intent 예문(`intent_examples`)을 Milvus에서 top_k 검색 후 LLM 컨텍스트로 사용
+  - intent 허용 라벨 6개 고정: 상품 누락/오배송/미배송/품절/파손/주문 취소
+  - risk는 intent와 분리하여 `risk` 필드로만 반환
+- HANDOFF 분기:
+  - `HandoffNotify` 노드 추가
+  - `notify_handoff` MCP tool로 webhook 알림
+  - Postgres `handoff_notifications`로 idempotent 보장
+- `prevision`:
+  - 지정 intent + 첨부 이미지가 있을 때만 실행
+  - Gemini multimodal(`google-genai`) 호출
+  - `label/confidence/unknown_reason`를 state에 저장
+- `plan_builder`:
+  - policy 기반 SCENARIO/AGENT 결정
+  - 다중 문의(최대 3개)와 `max_parallel` 계획 포함
+  - 슬롯 추출(체인+Pydantic) 후 state 저장
+- `scenario_subgraph`:
+  - YAML 템플릿 렌더 + sanitize(PII/정책문구)
+- `agent_generate_subgraph`:
+  - LangChain tool-calling agent + MCP Tool 래핑
+  - tool trace/state/metrics 기록
+- `validate_grounding`:
+  - 문의 커버리지 + citation + 정책 점수화
+  - 임계치 미달 시 기본 2회 재작성 루프
+- `decision_node`:
+  - `AUTO_POST` 또는 `DRAFT`만 수행
+  - HANDOFF는 decision 이전 분기에서 종료
+- 공통 로깅:
+  - 모든 노드 `node_execution`(latency/success/fail)
+  - PII 원문 저장 금지(마스킹 텍스트 길이 제한 태그만 기록)
 
-## 테스트/스모크 체크 예시
+## Agent 모드 Tool Calling 검증
+1. `type=클레임`, `subtype=파손` 요청으로 `/v1/cases/process` 호출
+2. 응답 `tool_trace` 또는 저장된 state의 `tooling.agent_steps` 확인
+3. `metrics_events`에서 `metric_name='tool_call'` 이벤트 확인
+
+## 테스트
 ```bash
-# unit
 PYTHONPATH=src python -m pytest -q
-
-# rag_search 툴 (MCP 컨테이너 실행 후)
-curl -X POST http://localhost:9002/tools/rag_search -H "content-type: application/json" -d '{"query":"환불 정책","sources":["policy"],"top_k":5,"tenant_id":"tenant-1"}'
-
-# vision triage 툴
-curl -X POST http://localhost:9002/tools/vision_triage -H "content-type: application/json" -d '{"attachments":[{"path":"/app/tests/data/sample.jpg"}]}'
+PYTHONPATH=src python -m compileall src apps scripts streamlit_app
 ```
-
-## 문서/보안 원칙
-- PII 원문 저장 금지 (로그/지표는 코드/카운트/요약만 저장)
-- 분류/검증/생성 노드는 Runnable chain + Pydantic parser 기반으로 JSON 파싱 안정성 확보
-- 고위험 판단 시 HANDOFF 우선으로 도구 호출을 최소화
