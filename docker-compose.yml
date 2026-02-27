@@ -29,6 +29,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp
+    environment:
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      POSTGRES_DSN: postgresql+psycopg://postgres:postgres@postgres:5432/boardbot
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_MM_MODEL: gemini-2.0-flash
     ports: ["9002:9000"]
 
   api:
@@ -39,6 +45,7 @@ services:
     environment:
       POSTGRES_DSN: postgresql+psycopg://postgres:postgres@postgres:5432/boardbot
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     ports: ["8000:8000"]
 
   streamlit:

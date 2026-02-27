@@ -38,3 +38,16 @@ CREATE INDEX IF NOT EXISTS idx_metrics_name_created ON metrics_events(metric_nam
 CREATE INDEX IF NOT EXISTS idx_metrics_tenant_created ON metrics_events((tags_jsonb->>'tenant_id'), created_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_decision_created ON metrics_events((tags_jsonb->>'decision'), created_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_tags_gin ON metrics_events USING GIN(tags_jsonb);
+
+
+CREATE TABLE IF NOT EXISTS rag_documents (
+  doc_id TEXT PRIMARY KEY,
+  tenant_id TEXT,
+  source_type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata_jsonb JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_docs_source ON rag_documents(source_type);
+CREATE INDEX IF NOT EXISTS idx_rag_docs_tenant ON rag_documents(tenant_id);

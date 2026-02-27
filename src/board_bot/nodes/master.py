@@ -11,14 +11,13 @@ Security:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from board_bot.models.state import AgentState
+from board_bot.services.llm_chains import classification_chain
 from board_bot.services.metrics import emit_metric
 from board_bot.services.prompts import load_prompt
 from board_bot.utils.safety import mask_pii, risk_score_rule
@@ -114,9 +113,7 @@ def classify_risk_route(state: AgentState, llm: ChatGoogleGenerativeAI | None = 
         cls = _dummy_classification(state, rule_risk)
         emit_metric(state, "llm_usage", tags={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0, "success": True})
     else:
-        msg = HumanMessage(content=f"{prompt['system']}\nINPUT:\n{state['safety']['masked_text']}")
-        raw = llm.invoke([msg]).content
-        cls = json.loads(raw)
+        cls = classification_chain(llm, state["safety"]["masked_text"])
         emit_metric(state, "llm_usage", tags={"prompt_tokens": 200, "completion_tokens": 150, "total_tokens": 350, "estimated_cost_usd": 0.001, "success": True})
 
     # 2단 게이트 취지: 규칙/LLM 중 하나라도 HIGH면 즉시 HANDOFF 하여 리스크 확산을 방지한다.
