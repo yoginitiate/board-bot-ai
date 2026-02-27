@@ -1,0 +1,49 @@
+# ============================================================================
+# 시스템 운영 설정(System Runtime Config)
+# ----------------------------------------------------------------------------
+# 무엇: 인프라 접속/런타임 안정성(타임아웃/재시도/관측) 관련 설정
+# 왜: 배포 환경(dev/stg/prod)마다 달라지는 값이므로 플랫폼/인프라 팀이 주로 관리
+# 누가/언제: 플랫폼 운영자가 인프라 변경/장애 대응 시 조정
+# 보안: 실제 운영에서는 비밀번호/API 키를 파일에 두지 말고 Secret/Env를 사용
+# ============================================================================
+version: v1
+
+# PostgreSQL 접속 정보 (환경별로 가장 자주 바뀌는 인프라 설정)
+postgres:
+  # [경고] 개발 기본값. 운영에서는 반드시 POSTGRES_DSN env/secret로 주입
+  dsn: postgresql+psycopg://postgres:postgres@postgres:5432/boardbot
+
+# Milvus 벡터 DB 런타임 설정
+milvus:
+  host: milvus
+  port: 19530
+  timeout_s: 5
+  collection_prefix: rag_
+  collections:
+    policy: rag_policy
+    manual: rag_manual
+    script: rag_script
+
+# MinIO(Object Storage) 접속 설정
+minio:
+  endpoint: minio:9000
+  access_key: minio
+  secret_key: miniopass
+  bucket: attachments
+  secure: false
+
+# MCP 서버 호출 런타임 정책
+mcp:
+  url: http://mcp:9000
+  timeout_s: 8
+  retry:
+    max_attempts: 2
+    backoff_s: 0.5
+  circuit_breaker:
+    failure_threshold: 5
+    reset_timeout_s: 30
+
+# 관측성/운영 로그 설정
+observability:
+  log_level: INFO
+  metrics_enabled: true

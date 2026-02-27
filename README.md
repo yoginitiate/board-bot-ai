@@ -1,13 +1,40 @@
 # Board Bot AI MVP + Dashboard
 
+## 설정 구조 분리 (중요)
+기존 단일 `config/app.yaml`에서 아래 두 파일로 역할을 분리했습니다.
+
+- `config/system.yaml`:
+  - 인프라/런타임(POSTGRES, Milvus, MinIO, MCP endpoint, timeout/retry)
+  - **플랫폼/인프라 팀**이 환경별(dev/stg/prod)로 관리
+- `config/policy.yaml`:
+  - 서비스 정책(LLM 모델군, RAG top_k/fusion, prevision 임계치, validation/decision/routing 정책)
+  - **서비스/운영/ML 팀**이 품질/비용/리스크 정책으로 관리
+
+`config/app.yaml`은 하위호환용 포인터 파일로 유지됩니다.
+
+## Config 로딩 우선순위
+`AppConfig` 우선순위는 다음과 같습니다.
+
+1. 환경변수 override (`POSTGRES_DSN`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MCP_URL`)
+2. `config/system.yaml` + `config/policy.yaml`
+3. 코드 기본값
+
 ## 실행
 ```bash
 docker compose up --build
 ```
 
-## 필수 환경변수
-- `GOOGLE_API_KEY` (Gemini Text/MM/Embedding)
-- 선택: `GEMINI_API_KEY` (호환)
+### 주요 엔드포인트
+- API: `http://localhost:8000`
+- MCP: `http://localhost:9002`
+- Streamlit: `http://localhost:8501`
+
+## 필수/권장 환경변수
+- 필수(운영): `GOOGLE_API_KEY`
+- 호환: `GEMINI_API_KEY`
+- 선택: `POSTGRES_DSN`, `MCP_URL`
+
+> 보안 주의: 운영 환경에서는 키/비밀번호를 YAML에 직접 쓰지 말고 Secret/Env로 주입하세요.
 
 ## 데이터 시드
 ```bash
@@ -16,43 +43,14 @@ python scripts/load_intent_examples.py
 python scripts/seed_dashboard_data.py
 ```
 
-## 이번 구현 핵심
-- `normalize_and_mask`: 마스킹 + 경량 전처리만 수행
-- `classify_risk_route`:
-  - intent 예문(`intent_examples`)을 Milvus에서 top_k 검색 후 LLM 컨텍스트로 사용
-  - intent 허용 라벨 6개 고정: 상품 누락/오배송/미배송/품절/파손/주문 취소
-  - risk는 intent와 분리하여 `risk` 필드로만 반환
-- HANDOFF 분기:
-  - `HandoffNotify` 노드 추가
-  - `notify_handoff` MCP tool로 webhook 알림
-  - Postgres `handoff_notifications`로 idempotent 보장
-- `prevision`:
-  - 지정 intent + 첨부 이미지가 있을 때만 실행
-  - Gemini multimodal(`google-genai`) 호출
-  - `label/confidence/unknown_reason`를 state에 저장
-- `plan_builder`:
-  - policy 기반 SCENARIO/AGENT 결정
-  - 다중 문의(최대 3개)와 `max_parallel` 계획 포함
-  - 슬롯 추출(체인+Pydantic) 후 state 저장
-- `scenario_subgraph`:
-  - YAML 템플릿 렌더 + sanitize(PII/정책문구)
-- `agent_generate_subgraph`:
-  - LangChain tool-calling agent + MCP Tool 래핑
-  - tool trace/state/metrics 기록
-- `validate_grounding`:
-  - 문의 커버리지 + citation + 정책 점수화
-  - 임계치 미달 시 기본 2회 재작성 루프
-- `decision_node`:
-  - `AUTO_POST` 또는 `DRAFT`만 수행
-  - HANDOFF는 decision 이전 분기에서 종료
-- 공통 로깅:
-  - 모든 노드 `node_execution`(latency/success/fail)
-  - PII 원문 저장 금지(마스킹 텍스트 길이 제한 태그만 기록)
+## 정책/런타임 변경 가이드
+- 인프라 변경(호스트/포트/타임아웃/재시도): `config/system.yaml`
+- 모델/검증/라우팅/결정 정책 변경: `config/policy.yaml`
 
-## Agent 모드 Tool Calling 검증
-1. `type=클레임`, `subtype=파손` 요청으로 `/v1/cases/process` 호출
-2. 응답 `tool_trace` 또는 저장된 state의 `tooling.agent_steps` 확인
-3. `metrics_events`에서 `metric_name='tool_call'` 이벤트 확인
+## Agent 동작 요약
+- Master: normalize/mask → classify/risk → prevision gate → plan
+- HANDOFF: 별도 `HandoffNotify` 노드로 분기 + idempotent 알림
+- Executor: scenario/agent 생성 → PII/Policy/Grounding 검증 → Decision(auto_post/draft)
 
 ## 테스트
 ```bash

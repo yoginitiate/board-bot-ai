@@ -1,11 +1,16 @@
-"""애플리케이션 설정 로더.
+"""설정 로더.
 
-YAML 설정을 읽고 일부 민감 값은 환경변수로 override한다.
+`system.yaml`(인프라/런타임)과 `policy.yaml`(서비스 정책)을 병합해
+애플리케이션 전역에서 단일 Config 객체로 사용하도록 제공한다.
+
+우선순위:
+    env override > yaml 값 > 코드 default
 """
 
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,35 +18,94 @@ import yaml
 
 
 class AppConfig:
-    """`config/app.yaml` 기반 설정 객체."""
+    """시스템/정책 설정을 병합 제공하는 구성 객체.
 
-    def __init__(self, path: str = "config/app.yaml") -> None:
-        """설정을 초기화한다."""
+    Args:
+        system_path: 시스템 운영 설정 파일 경로.
+        policy_path: 서비스 정책 설정 파일 경로.
+        compat_path: 하위호환 app.yaml 경로(선택).
 
-        self.path = Path(path)
-        self.data = self._load_yaml(self.path)
-        self.version = str(self.data.get("version", "v1"))
+    Side Effects:
+        파일 I/O를 수행해 YAML을 로드한다.
+
+    Security:
+        API Key/DSN은 환경변수 override를 우선 적용해야 한다.
+    """
+
+    def __init__(self, system_path: str = "config/system.yaml", policy_path: str = "config/policy.yaml", compat_path: str = "config/app.yaml") -> None:
+        self.system_path = Path(system_path)
+        self.policy_path = Path(policy_path)
+        self.compat_path = Path(compat_path)
+
+        self.system = self._load_yaml(self.system_path)
+        self.policy = self._load_yaml(self.policy_path)
+
+        # 하위호환: 구형 app.yaml이 있는 경우 파일 위치 힌트를 읽어 대체 로딩 시도
+        compat = self._load_yaml(self.compat_path)
+        if not self.system and compat.get("system_config_path"):
+            self.system = self._load_yaml(Path(compat["system_config_path"]))
+        if not self.policy and compat.get("policy_config_path"):
+            self.policy = self._load_yaml(Path(compat["policy_config_path"]))
+
+        self.data = self._merge_dicts(deepcopy(self.system), deepcopy(self.policy))
+        self.version = str(self.data.get("version", self.system.get("version", "v1")))
+        self._build_aliases()
         self._apply_env_overrides()
 
     @staticmethod
     def _load_yaml(path: Path) -> dict[str, Any]:
-        """YAML 파일을 로드한다."""
-
         if not path.exists():
             return {}
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
-    def _apply_env_overrides(self) -> None:
-        """환경변수 override를 적용한다."""
+    @staticmethod
+    def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        out = deepcopy(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = AppConfig._merge_dicts(out[k], v)
+            else:
+                out[k] = deepcopy(v)
+        return out
 
-        if key := os.getenv("GEMINI_API_KEY"):
-            self.data.setdefault("llm", {})["api_key"] = key
+    def _build_aliases(self) -> None:
+        """기존 참조 키 호환 alias를 구성한다.
+
+        Why:
+            코드 전체를 대규모 수정하지 않고 설정 분리를 점진 도입하기 위함.
+        """
+
+        llm = self.data.get("llm", {})
+        # 구형: llm.model / llm.api_key
+        llm.setdefault("model", self.data.get("llm", {}).get("text_model", "gemini-1.5-flash"))
+        llm.setdefault("api_key", "")
+        self.data["llm"] = llm
+
+        # 구형 키를 새 정책 키와 동기화
+        if "validation" in self.data:
+            self.data.setdefault("grounding", {})["threshold"] = self.data["validation"].get("grounding_threshold", 0.7)
+            self.data.setdefault("grounding", {})["max_rewrite"] = self.data["validation"].get("rewrite_max_attempts", 2)
+
+    def _apply_env_overrides(self) -> None:
+        """환경변수 override를 적용한다.
+
+        우선순위:
+            1) 명시 env(POSTGRES_DSN, GOOGLE_API_KEY ...)
+            2) YAML
+            3) 코드 default
+        """
+
         if dsn := os.getenv("POSTGRES_DSN"):
             self.data.setdefault("postgres", {})["dsn"] = dsn
 
-    def get(self, *keys: str, default: Any = None) -> Any:
-        """중첩 키를 안전하게 조회한다."""
+        api_env = self.data.get("llm", {}).get("api_key_env", "GOOGLE_API_KEY")
+        if key := os.getenv(api_env) or os.getenv("GEMINI_API_KEY"):
+            self.data.setdefault("llm", {})["api_key"] = key
 
+        if mcp_url := os.getenv("MCP_URL"):
+            self.data.setdefault("mcp", {})["url"] = mcp_url
+
+    def get(self, *keys: str, default: Any = None) -> Any:
         cur: Any = self.data
         for key in keys:
             if not isinstance(cur, dict) or key not in cur:

@@ -109,7 +109,7 @@ class AgentState(TypedDict):
         policy: 테넌트/유형 기반 정책 로딩 결과.
         tooling: MCP 도구 호출 trace.
         draft: 응답 초안/인용/모드.
-        decision: AUTO_POST/DRAFT/ASK_MORE/HANDOFF 결과.
+        decision: AUTO_POST/DRAFT/HANDOFF 결과.
         telemetry: metrics_events 적재용 이벤트 버퍼 및 버전 메타.
         classification: 분류 결과(선택).
         plan: Plan DSL 실행 계획(선택).

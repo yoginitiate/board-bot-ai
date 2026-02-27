@@ -1,45 +1,7 @@
+# 호환성 파일(Deprecated)
+# 기존 코드/스크립트와의 하위호환을 위해 유지합니다.
+# 실제 운영은 config/system.yaml + config/policy.yaml을 기준으로 로딩됩니다.
 version: v1
-postgres:
-  dsn: postgresql+psycopg://postgres:postgres@postgres:5432/boardbot
-milvus:
-  host: milvus
-  port: 19530
-  collections:
-    policy: rag_policy
-    manual: rag_manual
-    script: rag_script
-minio:
-  endpoint: minio:9000
-  access_key: minio
-  secret_key: miniopass
-gemini:
-  api_key_env: GOOGLE_API_KEY
-  text_model: gemini-1.5-flash
-  mm_model: gemini-2.0-flash
-  embedding_model: models/embedding-001
-llm:
-  provider: google_gemini
-  model: gemini-1.5-flash
-  api_key: ""
-rag:
-  hybrid:
-    dense_top_k: 20
-    sparse_top_k: 50
-    final_top_k: 10
-    fusion: rrf
-    rrf_k: 60
-  sources_default: ["policy", "manual", "script"]
-classify:
-  top_k: 6
-prevision:
-  max_images: 3
-  timeout_s: 20
-  retry: 1
-  confidence_threshold: 0.65
-handoff:
-  notification_channels: ["webhook"]
-grounding:
-  threshold: 0.7
-  max_rewrite: 2
-mcp:
-  url: http://mcp:9000
+compat_mode: true
+system_config_path: config/system.yaml
+policy_config_path: config/policy.yaml

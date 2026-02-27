@@ -40,13 +40,13 @@ class ProcessRequest(BaseModel):
     payload: CasePayload
 
 
-cfg = AppConfig("config/app.yaml")
+cfg = AppConfig(system_path="config/system.yaml", policy_path="config/policy.yaml", compat_path="config/app.yaml")
 repo = PostgresRepo(cfg.get("postgres", "dsn", default="postgresql+psycopg://postgres:postgres@localhost:5432/boardbot"))
 mcp = MCPClient(cfg.get("mcp", "url", default="http://mcp:9000"))
 policies = {"배송::지연": {"mode": "SCENARIO", "allow_auto_post": True}, "클레임::파손": {"mode": "AGENT", "allow_auto_post": False}}
 
 llm = None
-model_name = cfg.get("llm", "model", default="gemini-1.5-flash")
+model_name = cfg.get("llm", "text_model", default=cfg.get("llm", "model", default="gemini-1.5-flash"))
 api_key = cfg.get("llm", "api_key") or __import__("os").getenv("GOOGLE_API_KEY") or __import__("os").getenv("GEMINI_API_KEY")
 if ChatGoogleGenerativeAI and api_key:
     llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key, temperature=0)
