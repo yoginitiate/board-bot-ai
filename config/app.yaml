@@ -1,0 +1,7 @@
+# 호환성 파일(Deprecated)
+# 기존 코드/스크립트와의 하위호환을 위해 유지합니다.
+# 실제 운영은 config/system.yaml + config/policy.yaml을 기준으로 로딩됩니다.
+version: v1
+compat_mode: true
+system_config_path: config/system.yaml
+policy_config_path: config/policy.yaml
