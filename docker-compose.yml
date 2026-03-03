@@ -1,0 +1,58 @@
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MILVUS_HOST: ${MILVUS_HOST:-10.101.2.210}
+      MILVUS_PORT: ${MILVUS_PORT:-19530}
+    ports: ["9002:9000"]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    depends_on: [mcp]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MCP_URL: ${MCP_URL:-http://mcp:9000}
+    ports: ["8000:8000"]
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    depends_on: [api]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      API_URL: ${API_URL:-http://api:8000}
+    ports: ["8501:8501"]
+
+  # --------------------------------------------------------------------------
+  # 로컬 개발 옵션: 외부 인프라가 없을 때만 profile로 활성화
+  # 실행 예) docker compose --profile local-infra up -d postgres_local milvus_local
+  # --------------------------------------------------------------------------
+  postgres_local:
+    image: postgres:16
+    profiles: ["local-infra"]
+    environment:
+      POSTGRES_DB: boardbot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  milvus_local:
+    image: milvusdb/milvus:v2.4.13
+    profiles: ["local-infra"]
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      MINIO_USE_EMBED: "true"
+    ports: ["19530:19530", "9091:9091"]

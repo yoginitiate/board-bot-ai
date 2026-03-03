@@ -1,0 +1,34 @@
+# ============================================================================
+# 시스템 운영 설정(System Runtime Config)
+# ----------------------------------------------------------------------------
+# 운영 전제:
+# - PostgreSQL/Milvus는 외부 운영 서비스 사용(컨테이너 기본 기동 대상 아님)
+# - 민감정보(DSN/API Key)는 파일 대신 환경변수/시크릿 사용 권장
+# ============================================================================
+version: v1
+
+postgres:
+  # 운영에서는 POSTGRES_DSN 환경변수 우선
+  dsn: postgresql+psycopg://user:password@db-host:5432/boardbot
+
+milvus:
+  # 외부 운영 Milvus 예시
+  host: 10.101.2.210
+  port: 19530
+  timeout_s: 5
+  collection_name: semas_v2
+  output_fields: ["id", "page_content", "metadata", "source_type", "doc_id", "tenant_id"]
+
+mcp:
+  url: http://mcp:9000
+  timeout_s: 8
+  retry:
+    max_attempts: 2
+    backoff_s: 0.5
+  circuit_breaker:
+    failure_threshold: 5
+    reset_timeout_s: 30
+
+observability:
+  log_level: INFO
+  metrics_enabled: true

@@ -1,0 +1,108 @@
+# ============================================================================
+# 서비스 운영 정책(Service Policy Config)
+# ----------------------------------------------------------------------------
+# 목적: 모델/검색/검증/라우팅 정책을 인프라 설정과 분리
+# ============================================================================
+version: v1
+
+policy:
+  llm:
+    provider: openai # openai | google
+    text_model: gpt-4o
+    mm_model: gpt-4o
+    embedding_model: text-embedding-3-large
+    api_key_env: OPENAI_API_KEY
+
+  # 과거 설정 호환: 운영에서 LLM 입력으로 넘길 문서 개수 상한
+  rag:
+    llm_docs_limit: 5
+    sources_default: ["policy", "manual", "script"]
+    hybrid:
+      vocab:
+        mode: fixed # fixed | rebuild
+
+  retriever:
+    # 한국어 형태소 분석(kiwipiepy 미설치 시 정규식 fallback)
+    use_kiwi: true
+
+  # 운영형 hybrid_search 튜닝
+  # 참고: sparse.metric_type=BM25는 개념 설정이며,
+  # Milvus 검색 호출은 SPARSE_FLOAT_VECTOR + IP 조합으로 매핑한다.
+  hybrid_search:
+    dense:
+      metric_type: COSINE
+      nprobe: 10
+      limit: 10
+      index_type: IVF_SQ8
+      nlist: 512
+    sparse:
+      metric_type: BM25
+      k: 10
+      limit: 10
+      inverted_index_algo: DAAT_MAXSCORE
+    ranker:
+      type: rrf # rrf | weighted
+      rrf_k: 100
+      weights: [0.6, 0.4] # [sparse, dense]
+    embedding_model: text-embedding-3-large
+
+  model:
+    chat_model: gpt-4o
+    temperature: 0
+
+  MODEL_COSTS:
+    text-embedding-3-small: 0.02
+    text-embedding-3-large: 0.13
+    gpt-4o: 5.0
+
+  glossary:
+    enabled: true
+    max_terms: 8
+    max_synonyms_per_term: 3
+    description_max_chars: 120
+    injection:
+      mode: append_context # append_context | query_expand
+    expand:
+      for_dense: true
+      for_sparse: true
+    expose_to_customer: false
+    refresh:
+      enabled: false
+      ttl_seconds: 600
+
+  classify:
+    top_k: 6
+    allowed_intents: ["상품 누락", "상품 오배송", "상품 미배송", "품절", "상품 파손", "주문 취소"]
+
+  prevision:
+    enabled_intents: ["상품 누락", "상품 오배송", "상품 미배송", "상품 파손"]
+    confidence_threshold: 0.65
+    max_images: 3
+    timeout_s: 20
+    retry:
+      max_attempts: 1
+      backoff_s: 0.5
+
+  validation:
+    rewrite_max_attempts: 2
+    grounding_threshold: 0.7
+
+  routing:
+    scenario_template_dir: scenarios
+    intent_mode_map:
+      상품 누락: SCENARIO
+      상품 오배송: SCENARIO
+      상품 미배송: SCENARIO
+      품절: SCENARIO
+      상품 파손: AGENT
+      주문 취소: SCENARIO
+
+  tools:
+    tools_allowed: ["rag_search", "get_order", "get_shipping", "get_claims", "get_customer", "get_inventory", "vision_triage", "ocr_extract", "post_reply", "notify_handoff"]
+
+  decision:
+    allow_actions: ["auto_post", "draft"]
+    auto_post_default: allow
+
+  handoff:
+    notification_channels: ["webhook"]
